@@ -1,5 +1,7 @@
 package com.helgi.remote;
 
+import android.app.admin.DevicePolicyManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
@@ -7,10 +9,7 @@ import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.util.Log;
 import android.view.WindowManager;
-
-import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.List;
@@ -18,633 +17,384 @@ import java.util.Map;
 
 import fi.iki.elonen.NanoHTTPD;
 
-/**
- * NanoHTTPD subclass that implements all REST endpoints and serves the
- * embedded HTML control dashboard.
- */
 public class ControlServer extends NanoHTTPD {
-
-    private static final String TAG = "HelgiControlServer";
 
     private final Context context;
     private final AudioManager audioManager;
-    private final PowerManager powerManager;
+    private final DevicePolicyManager dpm;
+    private final ComponentName adminComponent;
 
-    // =========================================================================
-    // Construction
-    // =========================================================================
-
-    public ControlServer(Context context, int port) throws IOException {
+    public ControlServer(int port, Context context) {
         super(port);
-        this.context = context.getApplicationContext();
-        this.audioManager = (AudioManager) this.context.getSystemService(Context.AUDIO_SERVICE);
-        this.powerManager = (PowerManager) this.context.getSystemService(Context.POWER_SERVICE);
+        this.context = context;
+        this.audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        this.dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+        this.adminComponent = new ComponentName(context, AdminReceiver.class);
     }
-
-    // =========================================================================
-    // Request routing
-    // =========================================================================
 
     @Override
     public Response serve(IHTTPSession session) {
         String uri = session.getUri();
         Method method = session.getMethod();
+        Map<String, List<String>> params = session.getParameters();
 
-        Log.d(TAG, method + " " + uri);
+        // CORS headers
+        Response response;
 
         try {
-            switch (uri) {
-                case "/":
-                    return serveHtmlDashboard();
-
-                case "/status":
-                    if (Method.GET.equals(method)) return handleStatus();
-                    break;
-
-                case "/volume/up":
-                    if (Method.POST.equals(method)) return handleVolumeUp();
-                    break;
-
-                case "/volume/down":
-                    if (Method.POST.equals(method)) return handleVolumeDown();
-                    break;
-
-                case "/volume/set":
-                    if (Method.POST.equals(method)) return handleVolumeSet(session);
-                    break;
-
-                case "/shutdown":
-                    if (Method.POST.equals(method)) return handleShutdown();
-                    break;
-
-                case "/reboot":
-                    if (Method.POST.equals(method)) return handleReboot();
-                    break;
-
-                case "/close-apps":
-                    if (Method.POST.equals(method)) return handleCloseApps();
-                    break;
-
-                case "/screen/on":
-                    if (Method.POST.equals(method)) return handleScreenOn();
-                    break;
-
-                case "/screen/off":
-                    if (Method.POST.equals(method)) return handleScreenOff();
-                    break;
-
-                case "/brightness/set":
-                    if (Method.POST.equals(method)) return handleBrightnessSet(session);
-                    break;
-
-                default:
-                    return newFixedLengthResponse(Response.Status.NOT_FOUND,
-                            MIME_PLAINTEXT, "404 Not Found");
+            if (uri.equals("/") && method == Method.GET) {
+                response = serveHtml();
+            } else if (uri.equals("/status") && method == Method.GET) {
+                response = handleStatus();
+            } else if (uri.equals("/volume/up") && method == Method.POST) {
+                response = handleVolumeUp();
+            } else if (uri.equals("/volume/down") && method == Method.POST) {
+                response = handleVolumeDown();
+            } else if (uri.equals("/volume/set") && method == Method.POST) {
+                String level = getParam(params, "level", "50");
+                response = handleVolumeSet(Integer.parseInt(level));
+            } else if (uri.equals("/volume/mute") && method == Method.POST) {
+                response = handleMute();
+            } else if (uri.equals("/brightness/set") && method == Method.POST) {
+                String level = getParam(params, "level", "50");
+                response = handleBrightnessSet(Integer.parseInt(level));
+            } else if (uri.equals("/screen/on") && method == Method.POST) {
+                response = handleScreenOn();
+            } else if (uri.equals("/screen/off") && method == Method.POST) {
+                response = handleScreenOff();
+            } else if (uri.equals("/close-apps") && method == Method.POST) {
+                response = handleCloseApps();
+            } else if (uri.equals("/shutdown") && method == Method.POST) {
+                response = handleShutdown();
+            } else if (uri.equals("/reboot") && method == Method.POST) {
+                response = handleReboot();
+            } else {
+                response = newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json",
+                        "{\"status\":\"error\",\"message\":\"Endpoint non trovato\"}");
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error handling " + uri, e);
-            return jsonError("Errore interno: " + e.getMessage());
+            response = newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
+                    "{\"status\":\"error\",\"message\":\"" + e.getMessage() + "\"}");
         }
 
-        return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED,
-                MIME_PLAINTEXT, "Method Not Allowed");
+        response.addHeader("Access-Control-Allow-Origin", "*");
+        response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        return response;
     }
 
-    // =========================================================================
-    // Handlers
-    // =========================================================================
+    // ─── Volume ────────────────────────────────────────────────────────────────
 
-    /** GET /status */
-    private Response handleStatus() {
+    private Response handleVolumeUp() {
+        try {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI);
+            int vol = getVolumePercent();
+            return ok("Volume aumentato (" + vol + "%)");
+        } catch (Exception e) {
+            return error("Errore volume: " + e.getMessage());
+        }
+    }
+
+    private Response handleVolumeDown() {
+        try {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+            int vol = getVolumePercent();
+            return ok("Volume diminuito (" + vol + "%)");
+        } catch (Exception e) {
+            return error("Errore volume: " + e.getMessage());
+        }
+    }
+
+    private Response handleVolumeSet(int percent) {
         try {
             int maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            int curVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-            int volPct = (maxVol > 0) ? (curVol * 100 / maxVol) : 0;
-
-            String ip = RemoteService.getLocalIpAddress();
-            String deviceName = Build.MANUFACTURER + " " + Build.MODEL;
-            String androidVersion = "Android " + Build.VERSION.RELEASE
-                    + " (API " + Build.VERSION.SDK_INT + ")";
-            long uptimeSec = android.os.SystemClock.elapsedRealtime() / 1000;
-
-            JSONObject json = new JSONObject();
-            json.put("volume", volPct);
-            json.put("ip", ip != null ? ip : "N/A");
-            json.put("deviceName", deviceName);
-            json.put("androidVersion", androidVersion);
-            json.put("uptime", uptimeSec);
-
-            return corsResponse(Response.Status.OK, "application/json", json.toString());
-        } catch (Exception e) {
-            return jsonError(e.getMessage());
-        }
-    }
-
-    /** POST /volume/up */
-    private Response handleVolumeUp() {
-        audioManager.adjustStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                AudioManager.ADJUST_RAISE,
-                AudioManager.FLAG_SHOW_UI);
-        return jsonOk("Volume aumentato");
-    }
-
-    /** POST /volume/down */
-    private Response handleVolumeDown() {
-        audioManager.adjustStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                AudioManager.ADJUST_LOWER,
-                AudioManager.FLAG_SHOW_UI);
-        return jsonOk("Volume diminuito");
-    }
-
-    /** POST /volume/set?level=50 */
-    private Response handleVolumeSet(IHTTPSession session) {
-        String levelStr = getParam(session, "level");
-        if (levelStr == null) return jsonError("Parametro 'level' mancante");
-        try {
-            int pct = Math.max(0, Math.min(100, Integer.parseInt(levelStr)));
-            int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            int target = (int) Math.round(pct / 100.0 * max);
+            int target = (int) (maxVol * percent / 100.0);
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, AudioManager.FLAG_SHOW_UI);
-            return jsonOk("Volume impostato al " + pct + "%");
-        } catch (NumberFormatException e) {
-            return jsonError("Valore non valido: " + levelStr);
-        }
-    }
-
-    /** POST /shutdown */
-    private Response handleShutdown() {
-        new Thread(() -> {
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException ignored) {}
-            // Try shell command first (works on rooted / system-signed apps)
-            try {
-                Runtime.getRuntime().exec(new String[]{"su", "-c", "reboot -p"});
-                return;
-            } catch (IOException ignored) {}
-            try {
-                Runtime.getRuntime().exec("reboot -p");
-            } catch (IOException ignored) {}
-            // Fallback: broadcast (works only with proper system permissions)
-            Intent intent = new Intent("android.intent.action.ACTION_REQUEST_SHUTDOWN");
-            intent.putExtra("android.intent.extra.KEY_CONFIRM", false);
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(intent);
-        }).start();
-        return jsonOk("Spegnimento in corso…");
-    }
-
-    /** POST /reboot */
-    private Response handleReboot() {
-        new Thread(() -> {
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException ignored) {}
-            try {
-                Runtime.getRuntime().exec(new String[]{"su", "-c", "reboot"});
-                return;
-            } catch (IOException ignored) {}
-            try {
-                Runtime.getRuntime().exec("reboot");
-            } catch (IOException ignored) {}
-            powerManager.reboot(null);
-        }).start();
-        return jsonOk("Riavvio in corso…");
-    }
-
-    /** POST /close-apps */
-    private Response handleCloseApps() {
-        try {
-            android.app.ActivityManager am =
-                    (android.app.ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-            if (am != null) {
-                java.util.List<android.app.ActivityManager.RunningAppProcessInfo> procs =
-                        am.getRunningAppProcesses();
-                if (procs != null) {
-                    String ownPackage = context.getPackageName();
-                    int killed = 0;
-                    for (android.app.ActivityManager.RunningAppProcessInfo proc : procs) {
-                        if (proc.importance >
-                                android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_PERCEPTIBLE
-                                && !proc.processName.equals(ownPackage)) {
-                            am.killBackgroundProcesses(proc.processName);
-                            killed++;
-                        }
-                    }
-                    return jsonOk("Chiuse " + killed + " app in background");
-                }
-            }
-            return jsonOk("Nessuna app da chiudere");
+            return ok("Volume impostato al " + percent + "%");
         } catch (Exception e) {
-            return jsonError("Errore: " + e.getMessage());
+            return error("Errore volume: " + e.getMessage());
         }
     }
 
-    /** POST /screen/on */
+    private Response handleMute() {
+        try {
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI);
+            return ok("Audio silenziato");
+        } catch (Exception e) {
+            return error("Errore mute: " + e.getMessage());
+        }
+    }
+
+    private int getVolumePercent() {
+        int cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        return (max > 0) ? (int) (cur * 100.0 / max) : 0;
+    }
+
+    // ─── Luminosità ────────────────────────────────────────────────────────────
+
+    private Response handleBrightnessSet(int percent) {
+        try {
+            if (!Settings.System.canWrite(context)) {
+                return newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json",
+                        "{\"status\":\"error\",\"message\":\"Permesso mancante: vai in Impostazioni → App → Helgi Remote → Modifica impostazioni di sistema e attivalo\"}");
+            }
+            int brightness = (int) (255 * percent / 100.0);
+            brightness = Math.max(1, Math.min(255, brightness));
+            Settings.System.putInt(context.getContentResolver(),
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+            Settings.System.putInt(context.getContentResolver(),
+                    Settings.System.SCREEN_BRIGHTNESS, brightness);
+            return ok("Luminosità impostata al " + percent + "%");
+        } catch (Exception e) {
+            return error("Errore luminosità: " + e.getMessage());
+        }
+    }
+
+    // ─── Schermo ───────────────────────────────────────────────────────────────
+
     @SuppressWarnings("deprecation")
     private Response handleScreenOn() {
         try {
-            PowerManager.WakeLock wl = powerManager.newWakeLock(
+            PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            PowerManager.WakeLock wl = pm.newWakeLock(
                     PowerManager.FULL_WAKE_LOCK
                             | PowerManager.ACQUIRE_CAUSES_WAKEUP
                             | PowerManager.ON_AFTER_RELEASE,
-                    "helgi:screenwake");
-            wl.acquire(3000); // release after 3 s, screen stays on via WindowManager
-            return jsonOk("Schermo acceso");
+                    "helgi:wakelock");
+            wl.acquire(3000);
+            return ok("Schermo acceso");
         } catch (Exception e) {
-            return jsonError("Errore: " + e.getMessage());
+            return error("Errore accensione schermo: " + e.getMessage());
         }
     }
 
-    /** POST /screen/off */
-    @SuppressWarnings("deprecation")
     private Response handleScreenOff() {
         try {
-            // Acquiring PARTIAL_WAKE_LOCK and then releasing lets the system
-            // decide to turn off the display. Combined with a reboot of the
-            // screen policy via goToSleep (API 20+).
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
-                try { java.lang.reflect.Method m = powerManager.getClass().getMethod("goToSleep", long.class); m.invoke(powerManager, android.os.SystemClock.uptimeMillis()); } catch (Exception e) { /* not available */ }
-            } else {
-                PowerManager.WakeLock wl = powerManager.newWakeLock(
-                        PowerManager.PARTIAL_WAKE_LOCK, "helgi:screenoff");
-                wl.acquire(100);
-                wl.release();
+            if (!dpm.isAdminActive(adminComponent)) {
+                return newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json",
+                        "{\"status\":\"error\",\"message\":\"Per bloccare lo schermo devi prima attivare Helgi Remote come Amministratore: Impostazioni → Sicurezza → Amministratori dispositivo → Helgi Remote ✓\"}");
             }
-            return jsonOk("Schermo spento");
+            dpm.lockNow();
+            return ok("Schermo spento");
         } catch (Exception e) {
-            return jsonError("Errore (permessi insufficienti?): " + e.getMessage());
+            return error("Errore spegnimento schermo: " + e.getMessage());
         }
     }
 
-    /** POST /brightness/set?level=50 */
-    private Response handleBrightnessSet(IHTTPSession session) {
-        String levelStr = getParam(session, "level");
-        if (levelStr == null) return jsonError("Parametro 'level' mancante");
-        try {
-            int pct = Math.max(0, Math.min(100, Integer.parseInt(levelStr)));
-            int brightness = (int) Math.round(pct / 100.0 * 255);
+    // ─── App / Sistema ─────────────────────────────────────────────────────────
 
-            // Requires WRITE_SETTINGS (or system-level on Android 6+)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (!Settings.System.canWrite(context)) {
-                    return jsonError("Permesso WRITE_SETTINGS non concesso. " +
-                            "Vai in Impostazioni → App → Helgi Remote → " +
-                            "Permessi speciali → Modifica impostazioni di sistema.");
-                }
+    private Response handleCloseApps() {
+        try {
+            // Torna alla home (chiude l'app corrente in primo piano)
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+            homeIntent.addCategory(Intent.CATEGORY_HOME);
+            homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(homeIntent);
+            return ok("Tornato alla home — tutte le app in primo piano chiuse");
+        } catch (Exception e) {
+            return error("Errore chiusura app: " + e.getMessage());
+        }
+    }
+
+    private Response handleShutdown() {
+        try {
+            Runtime.getRuntime().exec(new String[]{"su", "-c", "reboot -p"});
+            return ok("Spegnimento in corso...");
+        } catch (Exception e) {
+            try {
+                Runtime.getRuntime().exec("reboot -p");
+                return ok("Spegnimento in corso...");
+            } catch (Exception e2) {
+                return error("Spegnimento non supportato su questo dispositivo (richiede root o firmware Helgi)");
             }
-            Settings.System.putInt(
-                    context.getContentResolver(),
-                    Settings.System.SCREEN_BRIGHTNESS_MODE,
-                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
-            Settings.System.putInt(
-                    context.getContentResolver(),
-                    Settings.System.SCREEN_BRIGHTNESS,
-                    brightness);
-            return jsonOk("Luminosità impostata al " + pct + "%");
-        } catch (NumberFormatException e) {
-            return jsonError("Valore non valido: " + levelStr);
         }
     }
 
-    // =========================================================================
-    // HTML Dashboard
-    // =========================================================================
-
-    private Response serveHtmlDashboard() {
-        String html = "<!DOCTYPE html>\n" +
-"<html lang=\"it\">\n" +
-"<head>\n" +
-"<meta charset=\"UTF-8\">\n" +
-"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
-"<title>Helgi Remote</title>\n" +
-"<style>\n" +
-"  :root {\n" +
-"    --bg: #0f0f14;\n" +
-"    --surface: #1a1a24;\n" +
-"    --surface2: #22222f;\n" +
-"    --accent: #6c63ff;\n" +
-"    --accent2: #ff6584;\n" +
-"    --green: #43e97b;\n" +
-"    --yellow: #f9ca24;\n" +
-"    --red: #ff4757;\n" +
-"    --text: #e8e8f0;\n" +
-"    --muted: #8888a8;\n" +
-"    --radius: 16px;\n" +
-"  }\n" +
-"  * { box-sizing: border-box; margin: 0; padding: 0; }\n" +
-"  body {\n" +
-"    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n" +
-"    background: var(--bg);\n" +
-"    color: var(--text);\n" +
-"    min-height: 100vh;\n" +
-"    padding: 0 0 80px;\n" +
-"  }\n" +
-"  header {\n" +
-"    background: linear-gradient(135deg, #1a1a2e, #16213e);\n" +
-"    padding: 24px 20px 20px;\n" +
-"    border-bottom: 1px solid #2a2a3e;\n" +
-"    position: sticky; top: 0; z-index: 100;\n" +
-"  }\n" +
-"  header h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.5px; }\n" +
-"  header h1 span { color: var(--accent); }\n" +
-"  .status-bar {\n" +
-"    display: flex; flex-wrap: wrap; gap: 8px;\n" +
-"    margin-top: 12px;\n" +
-"  }\n" +
-"  .status-chip {\n" +
-"    background: var(--surface2);\n" +
-"    border-radius: 20px;\n" +
-"    padding: 4px 12px;\n" +
-"    font-size: 0.75rem;\n" +
-"    color: var(--muted);\n" +
-"    display: flex; align-items: center; gap: 5px;\n" +
-"  }\n" +
-"  .status-chip .val { color: var(--text); font-weight: 600; }\n" +
-"  .ip-badge {\n" +
-"    background: var(--accent);\n" +
-"    color: #fff;\n" +
-"    border-radius: 20px;\n" +
-"    padding: 4px 14px;\n" +
-"    font-size: 0.8rem;\n" +
-"    font-weight: 700;\n" +
-"    letter-spacing: 0.3px;\n" +
-"  }\n" +
-"  .container { padding: 16px; max-width: 480px; margin: 0 auto; }\n" +
-"  .section { margin-bottom: 20px; }\n" +
-"  .section-title {\n" +
-"    font-size: 0.7rem;\n" +
-"    text-transform: uppercase;\n" +
-"    letter-spacing: 1.5px;\n" +
-"    color: var(--muted);\n" +
-"    margin-bottom: 10px;\n" +
-"    padding-left: 2px;\n" +
-"  }\n" +
-"  .card {\n" +
-"    background: var(--surface);\n" +
-"    border-radius: var(--radius);\n" +
-"    padding: 16px;\n" +
-"    border: 1px solid #2a2a3e;\n" +
-"  }\n" +
-"  .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }\n" +
-"  .btn-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }\n" +
-"  button {\n" +
-"    background: var(--surface2);\n" +
-"    border: 1px solid #2e2e42;\n" +
-"    border-radius: 12px;\n" +
-"    color: var(--text);\n" +
-"    padding: 14px 10px;\n" +
-"    font-size: 0.85rem;\n" +
-"    font-weight: 600;\n" +
-"    cursor: pointer;\n" +
-"    display: flex; flex-direction: column; align-items: center; gap: 6px;\n" +
-"    transition: all 0.15s ease;\n" +
-"    width: 100%;\n" +
-"    -webkit-tap-highlight-color: transparent;\n" +
-"  }\n" +
-"  button .icon { font-size: 1.4rem; line-height: 1; }\n" +
-"  button:active { transform: scale(0.94); opacity: 0.85; }\n" +
-"  button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }\n" +
-"  button.green  { background: var(--green);  border-color: var(--green);  color: #111; }\n" +
-"  button.red    { background: var(--red);    border-color: var(--red);    color: #fff; }\n" +
-"  button.yellow { background: var(--yellow); border-color: var(--yellow); color: #111; }\n" +
-"  .slider-row {\n" +
-"    display: flex; align-items: center; gap: 12px;\n" +
-"    margin-top: 12px;\n" +
-"  }\n" +
-"  .slider-row label { font-size: 0.85rem; color: var(--muted); min-width: 90px; }\n" +
-"  .slider-row .val-display {\n" +
-"    min-width: 38px; text-align: right;\n" +
-"    font-size: 0.85rem; font-weight: 700; color: var(--accent);\n" +
-"  }\n" +
-"  input[type=range] {\n" +
-"    flex: 1; height: 6px;\n" +
-"    -webkit-appearance: none;\n" +
-"    background: #2e2e42; border-radius: 6px; outline: none;\n" +
-"  }\n" +
-"  input[type=range]::-webkit-slider-thumb {\n" +
-"    -webkit-appearance: none;\n" +
-"    width: 22px; height: 22px;\n" +
-"    border-radius: 50%;\n" +
-"    background: var(--accent);\n" +
-"    cursor: pointer;\n" +
-"    box-shadow: 0 2px 8px rgba(108,99,255,0.4);\n" +
-"  }\n" +
-"  .toast {\n" +
-"    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px);\n" +
-"    background: #333;\n" +
-"    color: #fff;\n" +
-"    padding: 12px 24px;\n" +
-"    border-radius: 24px;\n" +
-"    font-size: 0.85rem;\n" +
-"    font-weight: 600;\n" +
-"    z-index: 999;\n" +
-"    transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);\n" +
-"    white-space: nowrap;\n" +
-"    max-width: 90vw;\n" +
-"    overflow: hidden; text-overflow: ellipsis;\n" +
-"  }\n" +
-"  .toast.show { transform: translateX(-50%) translateY(0); }\n" +
-"  .divider { height: 1px; background: #2a2a3e; margin: 14px 0; }\n" +
-"  @media (prefers-color-scheme: light) { body { background: #f0f0f8; } }\n" +
-"</style>\n" +
-"</head>\n" +
-"<body>\n" +
-"\n" +
-"<header>\n" +
-"  <h1>🖥️ Helgi <span>Remote</span></h1>\n" +
-"  <div class=\"status-bar\" id=\"statusBar\">\n" +
-"    <span class=\"status-chip\">Caricamento…</span>\n" +
-"  </div>\n" +
-"</header>\n" +
-"\n" +
-"<div class=\"container\">\n" +
-"\n" +
-"  <!-- VOLUME -->\n" +
-"  <div class=\"section\">\n" +
-"    <div class=\"section-title\">🔊 Volume</div>\n" +
-"    <div class=\"card\">\n" +
-"      <div class=\"btn-grid-3\">\n" +
-"        <button onclick=\"post('/volume/down')\">\n" +
-"          <span class=\"icon\">🔉</span>Meno\n" +
-"        </button>\n" +
-"        <button onclick=\"post('/volume/up')\">\n" +
-"          <span class=\"icon\">🔊</span>Più\n" +
-"        </button>\n" +
-"        <button onclick=\"post('/volume/set?level=0')\">\n" +
-"          <span class=\"icon\">🔇</span>Muto\n" +
-"        </button>\n" +
-"      </div>\n" +
-"      <div class=\"slider-row\">\n" +
-"        <label>Volume</label>\n" +
-"        <input type=\"range\" id=\"volSlider\" min=\"0\" max=\"100\" value=\"50\"\n" +
-"               oninput=\"document.getElementById('volVal').textContent=this.value+'%'\"\n" +
-"               onchange=\"post('/volume/set?level='+this.value)\">\n" +
-"        <span class=\"val-display\" id=\"volVal\">50%</span>\n" +
-"      </div>\n" +
-"    </div>\n" +
-"  </div>\n" +
-"\n" +
-"  <!-- LUMINOSITÀ -->\n" +
-"  <div class=\"section\">\n" +
-"    <div class=\"section-title\">☀️ Luminosità</div>\n" +
-"    <div class=\"card\">\n" +
-"      <div class=\"slider-row\">\n" +
-"        <label>Luminosità</label>\n" +
-"        <input type=\"range\" id=\"brightSlider\" min=\"0\" max=\"100\" value=\"50\"\n" +
-"               oninput=\"document.getElementById('brightVal').textContent=this.value+'%'\"\n" +
-"               onchange=\"post('/brightness/set?level='+this.value)\">\n" +
-"        <span class=\"val-display\" id=\"brightVal\">50%</span>\n" +
-"      </div>\n" +
-"    </div>\n" +
-"  </div>\n" +
-"\n" +
-"  <!-- SCHERMO -->\n" +
-"  <div class=\"section\">\n" +
-"    <div class=\"section-title\">📱 Schermo</div>\n" +
-"    <div class=\"card\">\n" +
-"      <div class=\"btn-grid\">\n" +
-"        <button class=\"green\" onclick=\"post('/screen/on')\">\n" +
-"          <span class=\"icon\">💡</span>Accendi\n" +
-"        </button>\n" +
-"        <button onclick=\"post('/screen/off')\">\n" +
-"          <span class=\"icon\">🌑</span>Spegni\n" +
-"        </button>\n" +
-"      </div>\n" +
-"    </div>\n" +
-"  </div>\n" +
-"\n" +
-"  <!-- APP -->\n" +
-"  <div class=\"section\">\n" +
-"    <div class=\"section-title\">📋 Applicazioni</div>\n" +
-"    <div class=\"card\">\n" +
-"      <button class=\"accent\" onclick=\"post('/close-apps')\">\n" +
-"        <span class=\"icon\">🗑️</span>Chiudi tutte le app\n" +
-"      </button>\n" +
-"    </div>\n" +
-"  </div>\n" +
-"\n" +
-"  <!-- SISTEMA -->\n" +
-"  <div class=\"section\">\n" +
-"    <div class=\"section-title\">⚙️ Sistema</div>\n" +
-"    <div class=\"card\">\n" +
-"      <div class=\"btn-grid\">\n" +
-"        <button class=\"yellow\" onclick=\"confirmAction('Riavviare il dispositivo?', '/reboot')\">\n" +
-"          <span class=\"icon\">🔄</span>Riavvia\n" +
-"        </button>\n" +
-"        <button class=\"red\" onclick=\"confirmAction('Spegnere il dispositivo?', '/shutdown')\">\n" +
-"          <span class=\"icon\">⏻</span>Spegni\n" +
-"        </button>\n" +
-"      </div>\n" +
-"    </div>\n" +
-"  </div>\n" +
-"\n" +
-"</div>\n" +
-"\n" +
-"<div class=\"toast\" id=\"toast\"></div>\n" +
-"\n" +
-"<script>\n" +
-"let toastTimer;\n" +
-"\n" +
-"function showToast(msg, ok) {\n" +
-"  const t = document.getElementById('toast');\n" +
-"  t.textContent = (ok ? '✅ ' : '❌ ') + msg;\n" +
-"  t.style.background = ok ? '#1e7a3a' : '#7a1e1e';\n" +
-"  t.classList.add('show');\n" +
-"  clearTimeout(toastTimer);\n" +
-"  toastTimer = setTimeout(() => t.classList.remove('show'), 2800);\n" +
-"}\n" +
-"\n" +
-"async function post(path) {\n" +
-"  try {\n" +
-"    const r = await fetch(path, { method: 'POST' });\n" +
-"    const j = await r.json();\n" +
-"    showToast(j.message || JSON.stringify(j), r.ok);\n" +
-"  } catch (e) { showToast('Errore di rete', false); }\n" +
-"}\n" +
-"\n" +
-"function confirmAction(msg, path) {\n" +
-"  if (confirm(msg)) post(path);\n" +
-"}\n" +
-"\n" +
-"async function refreshStatus() {\n" +
-"  try {\n" +
-"    const r = await fetch('/status');\n" +
-"    const d = await r.json();\n" +
-"    const bar = document.getElementById('statusBar');\n" +
-"    bar.innerHTML = `\n" +
-"      <span class=\"ip-badge\">📡 ${d.ip}:8080</span>\n" +
-"      <span class=\"status-chip\">🔊 <span class=\"val\">${d.volume}%</span></span>\n" +
-"      <span class=\"status-chip\">📱 <span class=\"val\">${d.deviceName}</span></span>\n" +
-"      <span class=\"status-chip\">🤖 <span class=\"val\">${d.androidVersion}</span></span>\n" +
-"      <span class=\"status-chip\">⏱ <span class=\"val\">${formatUptime(d.uptime)}</span></span>\n" +
-"    `;\n" +
-"    // Sync volume slider\n" +
-"    const vs = document.getElementById('volSlider');\n" +
-"    if (vs && document.activeElement !== vs) {\n" +
-"      vs.value = d.volume;\n" +
-"      document.getElementById('volVal').textContent = d.volume + '%';\n" +
-"    }\n" +
-"  } catch(e) {}\n" +
-"}\n" +
-"\n" +
-"function formatUptime(sec) {\n" +
-"  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;\n" +
-"  return h>0 ? h+'h '+m+'m' : m>0 ? m+'m '+s+'s' : s+'s';\n" +
-"}\n" +
-"\n" +
-"refreshStatus();\n" +
-"setInterval(refreshStatus, 5000);\n" +
-"</script>\n" +
-"</body>\n" +
-"</html>\n";
-
-        Response resp = newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html);
-        resp.addHeader("Access-Control-Allow-Origin", "*");
-        return resp;
-    }
-
-    // =========================================================================
-    // Helpers
-    // =========================================================================
-
-    private String getParam(IHTTPSession session, String key) {
-        Map<String, List<String>> params = session.getParameters();
-        if (params.containsKey(key) && !params.get(key).isEmpty()) {
-            return params.get(key).get(0);
-        }
-        return null;
-    }
-
-    private Response jsonOk(String message) {
+    private Response handleReboot() {
         try {
-            JSONObject j = new JSONObject();
-            j.put("ok", true);
-            j.put("message", message);
-            return corsResponse(Response.Status.OK, "application/json", j.toString());
+            Runtime.getRuntime().exec(new String[]{"su", "-c", "reboot"});
+            return ok("Riavvio in corso...");
         } catch (Exception e) {
-            return newFixedLengthResponse("{\"ok\":true}");
+            try {
+                Runtime.getRuntime().exec("reboot");
+                return ok("Riavvio in corso...");
+            } catch (Exception e2) {
+                return error("Riavvio non supportato su questo dispositivo (richiede root o firmware Helgi)");
+            }
         }
     }
 
-    private Response jsonError(String message) {
-        try {
-            JSONObject j = new JSONObject();
-            j.put("ok", false);
-            j.put("message", message);
-            return corsResponse(Response.Status.INTERNAL_ERROR, "application/json", j.toString());
-        } catch (Exception e) {
-            return newFixedLengthResponse("{\"ok\":false}");
-        }
+    // ─── Status ────────────────────────────────────────────────────────────────
+
+    private Response handleStatus() {
+        int vol = getVolumePercent();
+        String ip = RemoteService.getLocalIpAddress();
+        String device = Build.MODEL;
+        String android = Build.VERSION.RELEASE;
+        long uptime = android.os.SystemClock.elapsedRealtime() / 1000;
+        boolean adminActive = dpm.isAdminActive(adminComponent);
+        String json = "{\"status\":\"ok\","
+                + "\"volume\":" + vol + ","
+                + "\"ip\":\"" + ip + "\","
+                + "\"deviceName\":\"" + device + "\","
+                + "\"androidVersion\":\"" + android + "\","
+                + "\"uptime\":" + uptime + ","
+                + "\"adminActive\":" + adminActive + "}";
+        return newFixedLengthResponse(Response.Status.OK, "application/json", json);
     }
 
-    private Response corsResponse(Response.Status status, String mimeType, String body) {
-        Response resp = newFixedLengthResponse(status, mimeType, body);
-        resp.addHeader("Access-Control-Allow-Origin", "*");
-        resp.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        resp.addHeader("Access-Control-Allow-Headers", "Content-Type");
-        return resp;
+    // ─── HTML Dashboard ────────────────────────────────────────────────────────
+
+    private Response serveHtml() {
+        String html = "<!DOCTYPE html><html lang='it'><head><meta charset='UTF-8'>"
+            + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            + "<title>Helgi Remote</title>"
+            + "<style>"
+            + "*{box-sizing:border-box;margin:0;padding:0}"
+            + "body{background:#1a1a2e;color:#eee;font-family:system-ui,sans-serif;padding:16px}"
+            + "h1{text-align:center;color:#a855f7;margin-bottom:8px;font-size:1.4em}"
+            + "#status-bar{background:#16213e;border-radius:12px;padding:12px;margin-bottom:16px;font-size:.85em}"
+            + "#status-bar span{display:inline-block;background:#0f3460;border-radius:8px;padding:4px 10px;margin:2px}"
+            + ".card{background:#16213e;border-radius:14px;padding:16px;margin-bottom:12px}"
+            + ".card h2{font-size:.9em;color:#a855f7;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}"
+            + "button{border:none;border-radius:10px;padding:12px 16px;font-size:.95em;cursor:pointer;margin:4px;transition:.2s}"
+            + "button:active{transform:scale(.95)}"
+            + ".btn-primary{background:#a855f7;color:#fff}"
+            + ".btn-success{background:#22c55e;color:#fff}"
+            + ".btn-danger{background:#ef4444;color:#fff}"
+            + ".btn-warning{background:#f59e0b;color:#fff}"
+            + ".btn-gray{background:#374151;color:#eee}"
+            + ".btn-row{display:flex;flex-wrap:wrap;gap:4px}"
+            + "input[type=range]{width:100%;margin:8px 0;accent-color:#a855f7}"
+            + ".toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;"
+            + "padding:10px 20px;border-radius:10px;font-size:.9em;opacity:0;transition:.3s;z-index:999;max-width:90%}"
+            + ".toast.show{opacity:1}"
+            + ".toast.ok{background:#22c55e}"
+            + ".toast.err{background:#ef4444}"
+            + ".admin-warn{background:#7c2d12;border-radius:10px;padding:10px;font-size:.8em;margin-top:8px;display:none}"
+            + "</style></head><body>"
+            + "<h1>📺 Helgi Remote</h1>"
+            + "<div id='status-bar'>"
+            + "  <span id='s-ip'>📡 ...</span>"
+            + "  <span id='s-vol'>🔊 ...</span>"
+            + "  <span id='s-dev'>📱 ...</span>"
+            + "  <span id='s-and'>🤖 Android ...</span>"
+            + "  <span id='s-admin'>🔐 ...</span>"
+            + "</div>"
+
+            // Volume
+            + "<div class='card'><h2>🔊 Volume</h2>"
+            + "<div class='btn-row'>"
+            + "<button class='btn-gray' onclick='post(\"/volume/down\")'>➖</button>"
+            + "<button class='btn-gray' onclick='post(\"/volume/up\")'>➕</button>"
+            + "<button class='btn-warning' onclick='post(\"/volume/mute\")'>🔇 Muto</button>"
+            + "</div>"
+            + "<input type='range' id='vol-slider' min='0' max='100' value='50' oninput='setVolume(this.value)'>"
+            + "<div style='text-align:center;font-size:.85em;color:#aaa' id='vol-label'>50%</div>"
+            + "</div>"
+
+            // Luminosità
+            + "<div class='card'><h2>💡 Luminosità</h2>"
+            + "<input type='range' id='bri-slider' min='1' max='100' value='50' oninput='setBrightness(this.value)'>"
+            + "<div style='text-align:center;font-size:.85em;color:#aaa' id='bri-label'>50%</div>"
+            + "</div>"
+
+            // Schermo
+            + "<div class='card'><h2>📺 Schermo</h2>"
+            + "<div class='btn-row'>"
+            + "<button class='btn-success' onclick='post(\"/screen/on\")'>▶️ Accendi</button>"
+            + "<button class='btn-gray' onclick='post(\"/screen/off\")'>⏸️ Blocca</button>"
+            + "</div>"
+            + "<div class='admin-warn' id='admin-warn'>⚠️ Per bloccare lo schermo: <b>Impostazioni → Sicurezza → Amministratori dispositivo → Helgi Remote ✓</b></div>"
+            + "</div>"
+
+            // App
+            + "<div class='card'><h2>📱 Applicazioni</h2>"
+            + "<div class='btn-row'>"
+            + "<button class='btn-primary' onclick='post(\"/close-apps\")'>🏠 Vai alla Home</button>"
+            + "</div></div>"
+
+            // Sistema
+            + "<div class='card'><h2>⚙️ Sistema</h2>"
+            + "<div class='btn-row'>"
+            + "<button class='btn-warning' onclick='confirmAction(\"reboot\")'>🔄 Riavvia</button>"
+            + "<button class='btn-danger' onclick='confirmAction(\"shutdown\")'>⏹️ Spegni</button>"
+            + "</div></div>"
+
+            + "<div class='toast' id='toast'></div>"
+
+            + "<script>"
+            + "let volTimer, briTimer;"
+            + "function showToast(msg,ok){"
+            + "  const t=document.getElementById('toast');"
+            + "  t.textContent=msg; t.className='toast show '+(ok?'ok':'err');"
+            + "  setTimeout(()=>t.className='toast',2500);"
+            + "}"
+            + "async function post(url){"
+            + "  try{"
+            + "    const r=await fetch(url,{method:'POST'});"
+            + "    const j=await r.json();"
+            + "    if(j.status==='error'){"
+            + "      showToast('❌ '+j.message,false);"
+            + "      if(url==='/screen/off') document.getElementById('admin-warn').style.display='block';"
+            + "    } else {"
+            + "      showToast('✅ '+j.message,true);"
+            + "      document.getElementById('admin-warn').style.display='none';"
+            + "    }"
+            + "  } catch(e){ showToast('❌ Connessione persa',false); }"
+            + "  loadStatus();"
+            + "}"
+            + "function setVolume(v){"
+            + "  document.getElementById('vol-label').textContent=v+'%';"
+            + "  clearTimeout(volTimer);"
+            + "  volTimer=setTimeout(()=>fetch('/volume/set?level='+v,{method:'POST'}),300);"
+            + "}"
+            + "function setBrightness(v){"
+            + "  document.getElementById('bri-label').textContent=v+'%';"
+            + "  clearTimeout(briTimer);"
+            + "  briTimer=setTimeout(()=>fetch('/brightness/set?level='+v,{method:'POST'}),300);"
+            + "}"
+            + "function confirmAction(action){"
+            + "  const labels={reboot:'riavviare',shutdown:'spegnere'};"
+            + "  if(confirm('Sei sicuro di voler '+labels[action]+' il dispositivo?')) post('/'+action);"
+            + "}"
+            + "async function loadStatus(){"
+            + "  try{"
+            + "    const j=await (await fetch('/status')).json();"
+            + "    document.getElementById('s-ip').textContent='📡 '+j.ip+':8080';"
+            + "    document.getElementById('s-vol').textContent='🔊 '+j.volume+'%';"
+            + "    document.getElementById('s-dev').textContent='📱 '+j.deviceName;"
+            + "    document.getElementById('s-and').textContent='🤖 Android '+j.androidVersion;"
+            + "    document.getElementById('s-admin').textContent=j.adminActive?'🔐 Admin ✓':'🔐 Admin ✗';"
+            + "    document.getElementById('vol-slider').value=j.volume;"
+            + "    document.getElementById('vol-label').textContent=j.volume+'%';"
+            + "  } catch(e){}"
+            + "}"
+            + "loadStatus();"
+            + "setInterval(loadStatus,5000);"
+            + "</script></body></html>";
+
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html);
+    }
+
+    // ─── Helpers ───────────────────────────────────────────────────────────────
+
+    private Response ok(String message) {
+        return newFixedLengthResponse(Response.Status.OK, "application/json",
+                "{\"status\":\"ok\",\"message\":\"" + message + "\"}");
+    }
+
+    private Response error(String message) {
+        return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "application/json",
+                "{\"status\":\"error\",\"message\":\"" + message.replace("\"", "'") + "\"}");
+    }
+
+    private String getParam(Map<String, List<String>> params, String key, String def) {
+        List<String> vals = params.get(key);
+        return (vals != null && !vals.isEmpty()) ? vals.get(0) : def;
     }
 }
