@@ -183,3 +183,187 @@ Per evitare che Android sospenda `ControlServer` quando lo schermo è spento:
 
 * **Sicurezza di rete:** `ControlServer` espone un servizio di controllo sul dispositivo. Utilizza l'applicazione esclusivamente su reti locali fidate o tramite tunnel crittografati (es. WireGuard / Tailscale), evitando di esporre direttamente la porta su reti pubbliche non protette.
 * **Uso consentito:** Questo software è destinato esclusivamente alla gestione remota di dispositivi di propria proprietà o per i quali si dispone di esplicita autorizzazione amministrativa. L'autore declina ogni responsabilità per un uso improprio o non conforme alle normative vigenti.
+
+
+# Helgi Remote
+
+Android application for remote device management and control through an integrated server, a persistent background service, and **Device Administrator** privileges.
+
+---
+
+## Table of Contents
+
+1. [Overview & Features](#-overview--features)
+2. [Project Architecture](#-project-architecture)
+3. [Requirements & Recommended Versions](#-requirements--recommended-versions)
+4. [Repository Structure](#-repository-structure)
+5. [Installation Guide](#-installation-guide)
+   * [Option 1: Quick Install via Precompiled APK (`helgi-remote/`)](#option-1-quick-install-via-precompiled-apk-helgi-remote)
+   * [Option 2: Building from Source (`helgi-fixed/`)](#option-2-building-from-source-helgi-fixed)
+6. [Post-Installation Android Configuration](#-post-installation-android-configuration)
+7. [Usage Guide](#-usage-guide)
+8. [Troubleshooting](#-troubleshooting)
+9. [Security & Legal Disclaimer](#-security--legal-disclaimer)
+
+---
+
+## 🌟 Overview & Features
+
+**Helgi Remote** (`com.helgi.remote`) turns an Android device into a remotely manageable node over a local network (Wi-Fi/LAN) or private VPN. The app is designed to start automatically with the system and maintain an active control server without requiring constant user interaction on the screen.
+
+### Key Features
+
+* **Integrated Control Server (`ControlServer`):** Handles incoming requests and executes remote commands on the device.
+* **Persistent Service (`RemoteService`):** Keeps the control server operational in the background/foreground, protecting it from being automatically killed by the operating system.
+* **Device Administration (`AdminReceiver`):** Integrates official *Android Device Administration* APIs (`device_admin.xml`) for privileged management and security operations.
+* **Automatic Boot Startup (`BootReceiver`):** Intercepts the `BOOT_COMPLETED` system broadcast to automatically restart the service upon device power-on or reboot.
+
+---
+
+## 🏗️ Project Architecture
+
+The source code in `helgi-fixed/app/src/main/` is organized into the following core modules:
+
+| File / Component | Path | Role |
+| :--- | :--- | :--- |
+| **`MainActivity.java`** | `java/com/helgi/remote/` | Initial entry-point activity for manual service initialization and app launch. |
+| **`RemoteService.java`** | `java/com/helgi/remote/` | Android `Service` managing the background/foreground lifecycle of the remote server. |
+| **`ControlServer.java`** | `java/com/helgi/remote/` | Core logic: opens the listening socket/server, parses incoming commands, and executes actions. |
+| **`AdminReceiver.java`** | `java/com/helgi/remote/` | Extends `DeviceAdminReceiver` to manage device administration activation and security policies. |
+| **`BootReceiver.java`** | `java/com/helgi/remote/` | `BroadcastReceiver` that automatically starts `RemoteService` after system boot completes. |
+| **`device_admin.xml`** | `res/xml/` | Declares the required administrative policies requested by the app. |
+| **`ic_notification.xml`** | `res/drawable/` | Vector icon used for the persistent foreground service notification. |
+| **`AndroidManifest.xml`** | `src/main/` | Declares permissions, receivers (`AdminReceiver`, `BootReceiver`), `RemoteService`, and `MainActivity`. |
+
+---
+
+## ⚙️ Requirements & Recommended Versions
+
+To ensure maximum stability for background services, boot receivers, and administrator privileges, adhere to the following version specifications:
+
+### Android Device (Target Runtime)
+* **Minimum Version (`minSdk`):** **Android 8.0 Oreo (API 26)** — required for modern `ForegroundService` handling and notification channels (`NotificationChannel`).
+* **Recommended Version (`targetSdk`):** **Android 13 (API 33) – Android 14 (API 34)** *(also compatible with Android 15 / API 35)*.
+* **Version-Specific Notes:**
+  * **Android 10+ (API 29+):** Background activity/service launches after boot require the user to open the app manually at least once post-installation.
+  * **Android 13+ (API 33+):** Requires explicit user consent for the `POST_NOTIFICATIONS` permission so the foreground service notification remains visible and the system does not terminate the process.
+  * **Android 14+ (API 34+):** Requires explicit `foregroundServiceType` declaration in `AndroidManifest.xml` (e.g., `connectedDevice` / `dataSync` / `specialUse`).
+
+### Development Environment (Building from Source)
+* **JDK:** **Java 17** (LTS) — mandatory for Android Gradle Plugin 8.x.
+* **Android Studio:** **Android Studio Iguana (2023.2.1)**, **Ladybug (2024.2.1)**, or newer.
+* **Android Gradle Plugin (AGP):** `8.2.2` – `8.6.0`
+* **Gradle:** `8.4` – `8.9`
+* **Android SDK Build-Tools:** `34.0.0` (with `compileSdk 34`)
+
+---
+
+## 📂 Repository Structure
+
+```text
+├── helgi-remote/                  # Folder containing the ready-to-install precompiled .apk file
+├── helgi-fixed/                   # Complete Android project source code (Java)
+│   └── app/
+│       └── src/
+│           └── main/
+│               ├── AndroidManifest.xml
+│               ├── java/com/helgi/remote/
+│               │   ├── AdminReceiver.java
+│               │   ├── BootReceiver.java
+│               │   ├── ControlServer.java
+│               │   ├── MainActivity.java
+│               │   └── RemoteService.java
+│               └── res/
+│                   ├── drawable/ic_notification.xml
+│                   ├── values/strings.xml
+│                   └── xml/device_admin.xml
+└── README.md                      # Official documentation
+```
+
+---
+
+## 📥 Installation Guide
+
+### Option 1: Quick Install via Precompiled APK (`helgi-remote/`)
+If you do not wish to compile the project from source, you can install the pre-built package directly:
+
+1. Open the [**`helgi-remote/`**](./helgi-remote/) folder in this repository.
+2. Download the **`.apk`** file inside it to your Android device (on GitHub, click the file and hit **Download** or **View raw**).
+3. Open the downloaded `.apk` file using your phone's file manager (e.g., *Files by Google* or *My Files*).
+4. If prompted by the system, tap **Settings** and enable **Allow from this source** to authorize installing apps outside the Play Store.
+5. Confirm by tapping **Install**.
+   > *Note:* If a **Google Play Protect** warning appears because the APK is signed with a personal/development key, tap **More details → Install anyway**.
+
+### Option 2: Building from Source (`helgi-fixed/`)
+1. Clone the repository or download the source archive to your computer.
+2. Open **Android Studio**, select **Open**, and choose the **`helgi-fixed/`** folder.
+3. Wait for Gradle synchronization to complete (verify that **JDK 17** is selected in your project settings).
+4. To build the APK from the terminal inside the `helgi-fixed/` directory:
+   * **Linux / macOS:**
+     ```bash
+     chmod +x gradlew
+     ./gradlew assembleDebug
+     ```
+   * **Windows:**
+     ```cmd
+     gradlew.bat assembleDebug
+     ```
+5. The compiled APK will be output to:  
+   `helgi-fixed/app/build/outputs/apk/debug/app-debug.apk`
+
+---
+
+## 🛠️ Post-Installation Android Configuration
+
+After installing the APK, complete these **4 steps** on the Android device to ensure uninterrupted background operation:
+
+### 1. Initial Manual Launch
+Open **Helgi Remote** from your app drawer at least once. On Android, newly installed apps remain in a *Stopped* state and will not receive broadcast events like `BOOT_COMPLETED` until launched manually by the user.
+
+### 2. Enable Device Administrator Privileges (`AdminReceiver`)
+To enable administrative capabilities managed by `AdminReceiver`:
+1. Open Android **Settings**.
+2. Navigate to **Security & privacy → More security settings → Device admin apps** *(paths may vary by manufacturer, e.g., Passwords & security → Privacy)*.
+3. Select **Helgi Remote** and tap **Activate this device admin app**.
+
+### 3. Notification Permission (Android 13+)
+1. Long-press the **Helgi Remote** app icon → **App info** → **Notifications**.
+2. Ensure notifications are **Allowed** so `RemoteService` can display its persistent status icon (`ic_notification.xml`) and remain active in the foreground.
+
+### 4. Battery Optimization Exemption
+To prevent Android from suspending `ControlServer` when the screen turns off:
+1. Open **App info** for **Helgi Remote** → **App battery usage** (or *Battery*).
+2. Set it to **Unrestricted**.
+3. *(Xiaomi MIUI/HyperOS, Oppo, Vivo, Huawei only)*: Also enable **Autostart** in the app's system settings.
+
+---
+
+## 📱 Usage Guide
+
+1. **Verify Service Startup:**  
+   Once opened, `MainActivity` launches `RemoteService`, which initializes `ControlServer` in the background. The active service notification icon will appear in your status bar.
+2. **Find the Android Device IP Address:**  
+   Go to **Settings → Wi-Fi** (tap the connected network) or **Settings → About phone → Status → IP address**. Note the local IP assigned to the phone (e.g., `192.168.1.50`).
+3. **Connect to the `ControlServer`:**  
+   From a PC or another device connected to the **same local Wi-Fi / LAN network** (or the same private VPN, e.g., Tailscale/WireGuard), point your HTTP client or browser to the phone's IP address on the port configured in `ControlServer.java` (e.g., `http://192.168.1.50:<PORT>`).  
+   > *Developer Note:* To inspect or modify the listening port, access tokens, and supported endpoints/commands, check `helgi-fixed/app/src/main/java/com/helgi/remote/ControlServer.java`.
+4. **Test Boot Persistence:**  
+   Reboot your Android smartphone. Upon startup, `BootReceiver` will automatically start `RemoteService` without requiring you to manually reopen the app.
+
+---
+
+## 🔍 Troubleshooting
+
+| Problem | Probable Cause | Solution |
+| :--- | :--- | :--- |
+| **Server stops responding after a few minutes with screen off** | Android's power saver suspended the process. | Set battery usage to **Unrestricted** in *App info → Battery* and ensure service notifications are enabled. |
+| **App does not start automatically after device reboot** | The app was never opened manually post-installation, or the OEM blocks autostart. | Open **Helgi Remote** manually at least once and enable **Autostart** in system settings. |
+| **Cannot uninstall the app** | Android blocks uninstallation while Device Administrator privileges are active. | Go to **Settings → Device admin apps**, deactivate **Helgi Remote**, then uninstall normally. |
+| **Connection error from PC** | Devices are on different subnets or the router has **AP Isolation** enabled. | Verify PC and phone are on the same Wi-Fi network (not guest networks) and check port settings in `ControlServer.java`. |
+
+---
+
+## ⚖️ Security & Legal Disclaimer
+
+* **Network Security:** `ControlServer` exposes remote control capabilities on the device. Use this application exclusively on trusted local networks or over encrypted tunnels (e.g., WireGuard / Tailscale). Avoid exposing the port directly to unsecured public networks.
+* **Permitted Use:** This software is intended strictly for remote management of devices you own or for which you have explicit administrative authorization. The author disclaims all liability for misuse or non-compliance with applicable local laws.
