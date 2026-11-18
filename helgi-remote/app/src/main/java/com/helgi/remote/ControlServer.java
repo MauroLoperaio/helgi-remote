@@ -234,14 +234,14 @@ public class ControlServer extends NanoHTTPD {
         int vol = getVolumePercent();
         String ip = RemoteService.getLocalIpAddress();
         String device = Build.MODEL;
-        String android = Build.VERSION.RELEASE;
+        String androidVer = Build.VERSION.RELEASE;
         long uptime = android.os.SystemClock.elapsedRealtime() / 1000;
         boolean adminActive = dpm.isAdminActive(adminComponent);
         String json = "{\"status\":\"ok\","
                 + "\"volume\":" + vol + ","
                 + "\"ip\":\"" + ip + "\","
                 + "\"deviceName\":\"" + device + "\","
-                + "\"androidVersion\":\"" + android + "\","
+                + "\"androidVersion\":\"" + androidVer + "\","
                 + "\"uptime\":" + uptime + ","
                 + "\"adminActive\":" + adminActive + "}";
         return newFixedLengthResponse(Response.Status.OK, "application/json", json);
