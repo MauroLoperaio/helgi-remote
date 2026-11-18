@@ -1,5 +1,5 @@
 # Helgi Remote 
-For the English part, scroll down the page
+For the English part, scroll down the page.
 
 Applicazione Android per la gestione e il controllo remoto del dispositivo tramite server integrato, servizio persistente in background e privilegi di **Amministratore Dispositivo** (*Device Administrator*).
 
